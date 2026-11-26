@@ -1,0 +1,650 @@
+openapi: 3.0.3
+info:
+  title: System Design Interview Platform API
+  version: 0.1.0
+  description: |
+    The contract between `frontend/` and `backend/`. It mirrors the `Services` interface in
+    `frontend/src/services/types.ts`, which the in-browser mock implements today. A real backend
+    must satisfy this file; the frontend only needs a thin HTTP implementation of `Services`.
+
+    Real-time collaboration (canvas ops, presence) runs over a WebSocket described in
+    `docs/realtime-protocol.md`, not in this file.
+
+    Rules every implementation must follow:
+    - Authorize on every request; being in a room once is never sufficient.
+    - Guest tokens carry at least 128 bits of entropy, are stored only as hashes, and are returned
+      only once at creation.
+    - Never put tokens in logs or analytics.
+servers:
+  - url: /v1
+tags:
+  - name: auth
+  - name: sessions
+  - name: guest-links
+  - name: join
+  - name: collab
+security:
+  - sessionCookie: []
+paths:
+  /auth/magic-link:
+    post:
+      tags: [auth]
+      summary: Request a magic link (the mock signs in immediately)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string, maxLength: 40 }
+      responses:
+        '200':
+          description: Signed in (or link sent)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/Error' }
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current user
+      responses:
+        '200':
+          description: The signed-in user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Error' }
+  /auth/sign-out:
+    post:
+      tags: [auth]
+      summary: Sign out
+      responses:
+        '204': { description: Signed out }
+  /sessions:
+    post:
+      tags: [sessions]
+      summary: Create a draft session with a blank canvas
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSession' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [sessions]
+      summary: List sessions the caller owns or was invited to
+      responses:
+        '200':
+          description: Sessions, most recently updated first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SessionSummary' }
+  /sessions/{sessionId}:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    get:
+      tags: [sessions]
+      summary: Read session metadata
+      responses:
+        '200':
+          description: The session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [sessions]
+      summary: Update title, prompt, duration, cursor visibility, prompt reveal, capacity (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSession' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/start:
+    post:
+      tags: [sessions]
+      summary: draft -> live (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/end:
+    post:
+      tags: [sessions]
+      summary: live -> ended; saves a final snapshot (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/reopen:
+    post:
+      tags: [sessions]
+      summary: ended -> live (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/archive:
+    post:
+      tags: [sessions]
+      summary: Archive a draft or ended session (owner only; not allowed while live)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/duplicate:
+    post:
+      tags: [sessions]
+      summary: Copy a session and its canvas into a new draft (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '201':
+          description: The new draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/candidate-editing:
+    put:
+      tags: [sessions]
+      summary: Lock or unlock candidate editing (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/canvas:
+    get:
+      tags: [sessions]
+      summary: Latest saved canvas (final snapshot once ended)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Canvas document state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocState' }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [sessions]
+      summary: Clear the canvas, keeping a recoverable snapshot (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '204': { description: Cleared }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/canvas/restore:
+    post:
+      tags: [sessions]
+      summary: Restore the most recently cleared canvas (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '204': { description: Restored }
+        '404': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/canvas/export:
+    get:
+      tags: [sessions]
+      summary: Export the canvas as JSON
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Portable JSON export
+          content:
+            application/json:
+              schema: { type: object }
+  /sessions/{sessionId}/participants:
+    get:
+      tags: [sessions]
+      summary: List participants (not available to observers)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Participants
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Participant' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/participants/{participantId}:
+    delete:
+      tags: [sessions]
+      summary: Remove a participant and invalidate their credentials (owner only)
+      parameters:
+        - { $ref: '#/components/parameters/SessionId' }
+        - { name: participantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Removed }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/invitations:
+    post:
+      tags: [sessions]
+      summary: Invite an authenticated interviewer or observer (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [interviewer, observer] }
+      responses:
+        '204': { description: Invited }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/audit-events:
+    get:
+      tags: [sessions]
+      summary: Audit log (owner only)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Audit events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEvent' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/guest-links:
+    get:
+      tags: [guest-links]
+      summary: List links (never includes tokens)
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Links
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/GuestLink' }
+    post:
+      tags: [guest-links]
+      summary: Create a link. The token is returned only in this response.
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [candidate, observer], default: candidate }
+                expiresAt: { type: string, format: date-time, nullable: true }
+                maxUses: { type: integer, minimum: 1, nullable: true }
+      responses:
+        '201': { $ref: '#/components/responses/CreatedLink' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/guest-links/rotate:
+    post:
+      tags: [guest-links]
+      summary: Revoke every active link and create a new one
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '201': { $ref: '#/components/responses/CreatedLink' }
+        '403': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/guest-links/{linkId}:
+    delete:
+      tags: [guest-links]
+      summary: Revoke a link. Blocks new joins; does not disconnect current participants.
+      parameters:
+        - { $ref: '#/components/parameters/SessionId' }
+        - { name: linkId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Revoked }
+        '404': { $ref: '#/components/responses/Error' }
+  /join/preview:
+    post:
+      tags: [join]
+      summary: Validate a token and return the session title (rate limited)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenBody' }
+      responses:
+        '200':
+          description: Joinable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinPreview' }
+        '404': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /join/{token}:
+    post:
+      tags: [join]
+      summary: Exchange a link token for a participant and a short-lived collaboration credential
+      description: The token is a path parameter to match the product spec; servers must not log it.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 40 }
+      responses:
+        '200':
+          description: Joined
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinResult' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /sessions/{sessionId}/collab-credentials:
+    post:
+      tags: [collab]
+      summary: Credential for an authenticated interviewer or invitee
+      parameters: [{ $ref: '#/components/parameters/SessionId' }]
+      responses:
+        '200':
+          description: Credential
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CollabCredential' }
+        '403': { $ref: '#/components/responses/Error' }
+  /collab-credentials/refresh:
+    post:
+      tags: [collab]
+      summary: Exchange a credential for a fresh one (guests have no other API access)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CollabCredential' }
+      responses:
+        '200':
+          description: New credential
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CollabCredential' }
+        '401': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: sid
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Session:
+      description: The updated session
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/InterviewSession' }
+    CreatedLink:
+      description: Link metadata plus the one-time bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/CreatedGuestLink' }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    ErrorCode:
+      type: string
+      description: Stable machine-readable code. Suggested HTTP status in parentheses.
+      enum:
+        - UNAUTHENTICATED   # 401
+        - FORBIDDEN         # 403
+        - NOT_FOUND         # 404
+        - VALIDATION        # 400
+        - LINK_INVALID      # 404
+        - LINK_REVOKED      # 410
+        - LINK_EXPIRED      # 410
+        - LINK_EXHAUSTED    # 409
+        - SESSION_ARCHIVED  # 410
+        - SESSION_ENDED     # 410
+        - SESSION_FULL      # 409
+        - EDITING_LOCKED    # 403 (also a WebSocket error)
+        - INVALID_OP        # 400 (WebSocket)
+        - RATE_LIMITED      # 429
+        - OFFLINE           # client-side only
+        - CREDENTIAL_INVALID # 401
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { $ref: '#/components/schemas/ErrorCode' }
+        message: { type: string }
+    Role:
+      type: string
+      enum: [owner, interviewer, candidate, observer]
+    SessionState:
+      type: string
+      enum: [draft, live, ended, archived]
+    User:
+      type: object
+      required: [id, email, displayName, organizationId, createdAt]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        organizationId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    InterviewSession:
+      type: object
+      required: [id, ownerUserId, title, prompt, state, candidateEditingEnabled, cursorsVisible, promptReveal, durationMinutes, maxParticipants, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        ownerUserId: { type: string }
+        title: { type: string, maxLength: 120 }
+        prompt: { type: string, maxLength: 10000 }
+        state: { $ref: '#/components/schemas/SessionState' }
+        candidateEditingEnabled: { type: boolean }
+        cursorsVisible: { type: boolean }
+        promptReveal: { type: string, enum: [join, start] }
+        durationMinutes: { type: integer, minimum: 1, maximum: 480 }
+        maxParticipants: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        scheduledAt: { type: string, format: date-time, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        endedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    SessionSummary:
+      allOf:
+        - $ref: '#/components/schemas/InterviewSession'
+        - type: object
+          required: [myRole, participantNames]
+          properties:
+            myRole: { $ref: '#/components/schemas/Role' }
+            participantNames:
+              type: array
+              items: { type: string }
+    CreateSession:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, maxLength: 120 }
+        prompt: { type: string }
+        durationMinutes: { type: integer }
+        promptReveal: { type: string, enum: [join, start] }
+    UpdateSession:
+      type: object
+      properties:
+        title: { type: string }
+        prompt: { type: string }
+        durationMinutes: { type: integer }
+        cursorsVisible: { type: boolean }
+        promptReveal: { type: string, enum: [join, start] }
+        scheduledAt: { type: string, format: date-time, nullable: true }
+        maxParticipants: { type: integer }
+    RoomSession:
+      type: object
+      description: What a participant may see; `prompt` is null while hidden from them.
+      required: [id, title, prompt, state, candidateEditingEnabled, cursorsVisible, durationMinutes]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        prompt: { type: string, nullable: true }
+        state: { $ref: '#/components/schemas/SessionState' }
+        candidateEditingEnabled: { type: boolean }
+        cursorsVisible: { type: boolean }
+        durationMinutes: { type: integer }
+        startedAt: { type: string, format: date-time, nullable: true }
+        endedAt: { type: string, format: date-time, nullable: true }
+    Participant:
+      type: object
+      required: [id, sessionId, displayName, role, joinedAt, removed]
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        userId: { type: string, nullable: true }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        joinedAt: { type: string, format: date-time }
+        leftAt: { type: string, format: date-time, nullable: true }
+        removed: { type: boolean }
+    GuestLink:
+      type: object
+      required: [id, sessionId, roleGranted, uses, createdAt]
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        roleGranted: { type: string, enum: [candidate, observer] }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        maxUses: { type: integer, nullable: true }
+        uses: { type: integer }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    CreatedGuestLink:
+      type: object
+      required: [link, token]
+      properties:
+        link: { $ref: '#/components/schemas/GuestLink' }
+        token: { type: string, description: 'At least 128 bits of entropy. Shown once.' }
+    TokenBody:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    JoinPreview:
+      type: object
+      required: [sessionId, sessionTitle, state]
+      properties:
+        sessionId: { type: string }
+        sessionTitle: { type: string }
+        state: { $ref: '#/components/schemas/SessionState' }
+    JoinResult:
+      type: object
+      required: [participant, credential, session]
+      properties:
+        participant: { $ref: '#/components/schemas/Participant' }
+        credential: { $ref: '#/components/schemas/CollabCredential' }
+        session: { $ref: '#/components/schemas/RoomSession' }
+    CollabCredential:
+      type: object
+      description: Short-lived credential used to open the collaboration WebSocket.
+      required: [id, sessionId, participantId, role, expiresAt]
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        participantId: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        expiresAt: { type: string, format: date-time }
+    AuditEvent:
+      type: object
+      required: [id, sessionId, actor, action, at]
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        actor: { type: string }
+        action:
+          type: string
+          description: e.g. session_created, link_created, link_rotated, link_revoked, participant_removed, editing_locked, editing_unlocked, session_started, session_ended, canvas_cleared
+        at: { type: string, format: date-time }
+        meta:
+          type: object
+          additionalProperties:
+            oneOf: [{ type: string }, { type: number }, { type: boolean }]
+            nullable: true
+    Clock:
+      type: object
+      required: [t, a]
+      properties:
+        t: { type: integer, description: Lamport time }
+        a: { type: string, description: Actor id (tiebreak) }
+    CanvasOp:
+      type: object
+      description: |
+        Field-level last-writer-wins operation. Deleting an element sets `deleted: true`.
+        Allowed field names and value limits are listed in docs/realtime-protocol.md.
+      required: [id, elementId, clock, fields]
+      properties:
+        id: { type: string, maxLength: 64 }
+        elementId: { type: string, maxLength: 64 }
+        clock: { $ref: '#/components/schemas/Clock' }
+        fields: { type: object }
+    DocState:
+      type: object
+      required: [schemaVersion, elements]
+      properties:
+        schemaVersion: { type: integer, example: 1 }
+        elements:
+          type: object
+          description: 'elementId -> field -> { v: value, c: Clock }'
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: object
+              required: [v, c]
+              properties:
+                v: {}
+                c: { $ref: '#/components/schemas/Clock' }
